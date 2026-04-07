@@ -1,235 +1,247 @@
-"""SQLite database — schema + CRUD for the Turkish tutor."""
-import json
-import sqlite3
-from contextlib import contextmanager
-from datetime import date, datetime, timedelta
-from pathlib import Path
+"""Supabase database — CRUD for the Turkish tutor."""
+from __future__ import annotations
 
-DB_PATH = Path(__file__).parent / "tutor.db"
+import os
+from datetime import date, timedelta
+
+from supabase import Client, create_client
+
+_client: Client | None = None
 
 
-@contextmanager
-def conn():
-    c = sqlite3.connect(DB_PATH)
-    c.row_factory = sqlite3.Row
-    try:
-        yield c
-        c.commit()
-    finally:
-        c.close()
+def _db() -> Client:
+    global _client
+    if _client is None:
+        url = os.getenv("SUPABASE_URL", "")
+        key = os.getenv("SUPABASE_KEY", "")
+        if not url or not key:
+            raise RuntimeError("SUPABASE_URL and SUPABASE_KEY must be set in .env")
+        _client = create_client(url, key)
+    return _client
 
 
 def init_db() -> None:
-    with conn() as c:
-        c.executescript("""
-        CREATE TABLE IF NOT EXISTS profile (
-            user_id     INTEGER PRIMARY KEY,
-            level       TEXT    DEFAULT 'A1',
-            xp          INTEGER DEFAULT 0,
-            streak      INTEGER DEFAULT 0,
-            last_active TEXT,
-            current_focus TEXT  DEFAULT 'التحية والمفردات الأساسية'
-        );
-
-        CREATE TABLE IF NOT EXISTS messages (
-            id        INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id   INTEGER NOT NULL,
-            role      TEXT    NOT NULL,
-            content   TEXT    NOT NULL,
-            timestamp TEXT    DEFAULT (datetime('now'))
-        );
-
-        CREATE TABLE IF NOT EXISTS weaknesses (
-            id        INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id   INTEGER NOT NULL,
-            topic     TEXT    NOT NULL,
-            count     INTEGER DEFAULT 1,
-            last_seen TEXT    DEFAULT (datetime('now')),
-            example   TEXT,
-            UNIQUE(user_id, topic)
-        );
-
-        CREATE TABLE IF NOT EXISTS strengths (
-            id           INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id      INTEGER NOT NULL,
-            topic        TEXT    NOT NULL,
-            confirmed_at TEXT    DEFAULT (datetime('now')),
-            review_due   TEXT,
-            UNIQUE(user_id, topic)
-        );
-
-        CREATE TABLE IF NOT EXISTS vocab_srs (
-            id          INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id     INTEGER NOT NULL,
-            word        TEXT    NOT NULL,
-            translation TEXT    NOT NULL,
-            ease_factor REAL    DEFAULT 2.5,
-            interval    INTEGER DEFAULT 1,
-            due_date    TEXT    DEFAULT (date('now')),
-            repetitions INTEGER DEFAULT 0,
-            UNIQUE(user_id, word)
-        );
-        """)
+    """Verify Supabase connection. Tables are created via supabase/schema.sql."""
+    _db()
 
 
 # ─── Profile ──────────────────────────────────────────────────────────────────
 
 def get_or_create_profile(user_id: int) -> dict:
-    with conn() as c:
-        row = c.execute("SELECT * FROM profile WHERE user_id=?", (user_id,)).fetchone()
-        if not row:
-            c.execute("INSERT INTO profile (user_id) VALUES (?)", (user_id,))
-            row = c.execute("SELECT * FROM profile WHERE user_id=?", (user_id,)).fetchone()
-        _update_streak(c, user_id)
-        return dict(row)
+    db = _db()
+    res = db.table("profile").select("*").eq("user_id", user_id).execute()
+    if not res.data:
+        db.table("profile").insert({
+            "user_id": user_id,
+            "level": "A1",
+            "xp": 0,
+            "streak": 0,
+            "last_active": None,
+            "current_focus": "التحية والمفردات الأساسية",
+        }).execute()
+        res = db.table("profile").select("*").eq("user_id", user_id).execute()
+
+    profile = res.data[0]
+    _update_streak(user_id, profile)
+    # Refresh after streak update
+    return db.table("profile").select("*").eq("user_id", user_id).execute().data[0]
 
 
-def _update_streak(c: sqlite3.Connection, user_id: int) -> None:
+def _update_streak(user_id: int, profile: dict) -> None:
     today = date.today().isoformat()
-    row = c.execute("SELECT last_active, streak FROM profile WHERE user_id=?", (user_id,)).fetchone()
-    if not row:
-        return
-    last = row["last_active"]
-    streak = row["streak"]
+    last = profile.get("last_active")
     if last == today:
         return
     yesterday = (date.today() - timedelta(days=1)).isoformat()
-    new_streak = streak + 1 if last == yesterday else 1
-    c.execute("UPDATE profile SET streak=?, last_active=? WHERE user_id=?",
-              (new_streak, today, user_id))
+    new_streak = (profile.get("streak") or 0) + 1 if last == yesterday else 1
+    _db().table("profile").update({
+        "streak": new_streak,
+        "last_active": today,
+    }).eq("user_id", user_id).execute()
 
 
 def update_focus(user_id: int, focus: str) -> None:
-    with conn() as c:
-        c.execute("UPDATE profile SET current_focus=? WHERE user_id=?", (focus, user_id))
+    _db().table("profile").update({"current_focus": focus}).eq("user_id", user_id).execute()
 
 
 def add_xp(user_id: int, amount: int = 5) -> None:
-    with conn() as c:
-        c.execute("UPDATE profile SET xp=xp+? WHERE user_id=?", (amount, user_id))
+    profile = _db().table("profile").select("xp").eq("user_id", user_id).execute().data
+    if profile:
+        _db().table("profile").update({"xp": profile[0]["xp"] + amount}).eq("user_id", user_id).execute()
 
 
 # ─── Messages ─────────────────────────────────────────────────────────────────
 
 def save_message(user_id: int, role: str, content: str) -> None:
-    with conn() as c:
-        c.execute("INSERT INTO messages (user_id, role, content) VALUES (?,?,?)",
-                  (user_id, role, content))
+    _db().table("messages").insert({
+        "user_id": user_id,
+        "role": role,
+        "content": content,
+    }).execute()
 
 
 def get_recent_messages(user_id: int, n: int = 20) -> list[dict]:
-    with conn() as c:
-        rows = c.execute(
-            "SELECT role, content FROM messages WHERE user_id=? ORDER BY id DESC LIMIT ?",
-            (user_id, n)
-        ).fetchall()
-    return [dict(r) for r in reversed(rows)]
+    res = (
+        _db().table("messages")
+        .select("role, content")
+        .eq("user_id", user_id)
+        .order("id", desc=True)
+        .limit(n)
+        .execute()
+    )
+    return list(reversed(res.data))
 
 
 # ─── Weaknesses ───────────────────────────────────────────────────────────────
 
 def upsert_weakness(user_id: int, topic: str, example: str = "") -> None:
-    with conn() as c:
-        c.execute("""
-        INSERT INTO weaknesses (user_id, topic, count, last_seen, example)
-        VALUES (?, ?, 1, datetime('now'), ?)
-        ON CONFLICT(user_id, topic) DO UPDATE SET
-            count    = count + 1,
-            last_seen = datetime('now'),
-            example  = excluded.example
-        """, (user_id, topic, example))
+    db = _db()
+    today = date.today().isoformat()
+    existing = db.table("weaknesses").select("id, count").eq("user_id", user_id).eq("topic", topic).execute()
+    if existing.data:
+        row = existing.data[0]
+        db.table("weaknesses").update({
+            "count": row["count"] + 1,
+            "last_seen": today,
+            "example": example or None,
+        }).eq("id", row["id"]).execute()
+    else:
+        db.table("weaknesses").insert({
+            "user_id": user_id,
+            "topic": topic,
+            "count": 1,
+            "last_seen": today,
+            "example": example or None,
+        }).execute()
 
 
 def get_top_weaknesses(user_id: int, n: int = 3) -> list[dict]:
-    with conn() as c:
-        rows = c.execute(
-            "SELECT topic, count, example FROM weaknesses WHERE user_id=? ORDER BY count DESC LIMIT ?",
-            (user_id, n)
-        ).fetchall()
-    return [dict(r) for r in rows]
+    res = (
+        _db().table("weaknesses")
+        .select("topic, count, example")
+        .eq("user_id", user_id)
+        .order("count", desc=True)
+        .limit(n)
+        .execute()
+    )
+    return res.data
 
 
 # ─── Strengths ────────────────────────────────────────────────────────────────
 
 def upsert_strength(user_id: int, topic: str) -> None:
+    db = _db()
     review_due = (date.today() + timedelta(days=7)).isoformat()
-    with conn() as c:
-        c.execute("""
-        INSERT INTO strengths (user_id, topic, confirmed_at, review_due)
-        VALUES (?, ?, datetime('now'), ?)
-        ON CONFLICT(user_id, topic) DO UPDATE SET
-            confirmed_at = datetime('now'),
-            review_due   = excluded.review_due
-        """, (user_id, topic, review_due))
+    today = date.today().isoformat()
+    existing = db.table("strengths").select("id").eq("user_id", user_id).eq("topic", topic).execute()
+    if existing.data:
+        db.table("strengths").update({
+            "confirmed_at": today,
+            "review_due": review_due,
+        }).eq("id", existing.data[0]["id"]).execute()
+    else:
+        db.table("strengths").insert({
+            "user_id": user_id,
+            "topic": topic,
+            "confirmed_at": today,
+            "review_due": review_due,
+        }).execute()
 
 
 def get_due_strengths(user_id: int) -> list[dict]:
     today = date.today().isoformat()
-    with conn() as c:
-        rows = c.execute(
-            "SELECT topic FROM strengths WHERE user_id=? AND review_due <= ?",
-            (user_id, today)
-        ).fetchall()
-    return [dict(r) for r in rows]
+    res = (
+        _db().table("strengths")
+        .select("topic")
+        .eq("user_id", user_id)
+        .lte("review_due", today)
+        .execute()
+    )
+    return res.data
 
 
 # ─── Vocab SRS (SM-2) ─────────────────────────────────────────────────────────
 
 def add_vocab(user_id: int, word: str, translation: str) -> None:
-    with conn() as c:
-        c.execute("""
-        INSERT OR IGNORE INTO vocab_srs (user_id, word, translation) VALUES (?,?,?)
-        """, (user_id, word, translation))
+    db = _db()
+    existing = db.table("vocab_srs").select("id").eq("user_id", user_id).eq("word", word).execute()
+    if not existing.data:
+        db.table("vocab_srs").insert({
+            "user_id": user_id,
+            "word": word,
+            "translation": translation,
+            "ease_factor": 2.5,
+            "interval": 1,
+            "due_date": date.today().isoformat(),
+            "repetitions": 0,
+        }).execute()
 
 
 def get_due_vocab(user_id: int, n: int = 5) -> list[dict]:
     today = date.today().isoformat()
-    with conn() as c:
-        rows = c.execute(
-            "SELECT * FROM vocab_srs WHERE user_id=? AND due_date<=? ORDER BY due_date LIMIT ?",
-            (user_id, today, n)
-        ).fetchall()
-    return [dict(r) for r in rows]
+    res = (
+        _db().table("vocab_srs")
+        .select("*")
+        .eq("user_id", user_id)
+        .lte("due_date", today)
+        .order("due_date")
+        .limit(n)
+        .execute()
+    )
+    return res.data
 
 
 def update_vocab_srs(user_id: int, word: str, quality: int) -> None:
-    """quality: 0-5 (SM-2 standard). 0-2=fail, 3-5=pass."""
-    with conn() as c:
-        row = c.execute(
-            "SELECT ease_factor, interval, repetitions FROM vocab_srs WHERE user_id=? AND word=?",
-            (user_id, word)
-        ).fetchone()
-        if not row:
-            return
-        ef, interval, reps = row["ease_factor"], row["interval"], row["repetitions"]
-        if quality < 3:
-            interval, reps = 1, 0
+    """quality: 0-5 (SM-2). 0-2=fail, 3-5=pass."""
+    res = (
+        _db().table("vocab_srs")
+        .select("ease_factor, interval, repetitions")
+        .eq("user_id", user_id).eq("word", word)
+        .execute()
+    )
+    if not res.data:
+        return
+    row = res.data[0]
+    ef, interval, reps = row["ease_factor"], row["interval"], row["repetitions"]
+
+    if quality < 3:
+        interval, reps = 1, 0
+    else:
+        if reps == 0:
+            interval = 1
+        elif reps == 1:
+            interval = 6
         else:
-            if reps == 0:
-                interval = 1
-            elif reps == 1:
-                interval = 6
-            else:
-                interval = round(interval * ef)
-            reps += 1
-        ef = max(1.3, ef + 0.1 - (5 - quality) * (0.08 + (5 - quality) * 0.02))
-        due = (date.today() + timedelta(days=interval)).isoformat()
-        c.execute("""
-        UPDATE vocab_srs SET ease_factor=?, interval=?, repetitions=?, due_date=?
-        WHERE user_id=? AND word=?
-        """, (ef, interval, reps, due, user_id, word))
+            interval = round(interval * ef)
+        reps += 1
+    ef = max(1.3, ef + 0.1 - (5 - quality) * (0.08 + (5 - quality) * 0.02))
+    due = (date.today() + timedelta(days=interval)).isoformat()
+
+    _db().table("vocab_srs").update({
+        "ease_factor": ef,
+        "interval": interval,
+        "repetitions": reps,
+        "due_date": due,
+    }).eq("user_id", user_id).eq("word", word).execute()
 
 
 # ─── Stats ────────────────────────────────────────────────────────────────────
 
 def get_stats(user_id: int) -> dict:
-    with conn() as c:
-        profile = dict(c.execute("SELECT * FROM profile WHERE user_id=?", (user_id,)).fetchone() or {})
-        vocab_count = c.execute(
-            "SELECT COUNT(*) as n FROM vocab_srs WHERE user_id=?", (user_id,)
-        ).fetchone()["n"]
-        weaknesses = [dict(r) for r in c.execute(
-            "SELECT topic, count FROM weaknesses WHERE user_id=? ORDER BY count DESC LIMIT 3",
-            (user_id,)
-        ).fetchall()]
+    db = _db()
+    profile_res = db.table("profile").select("*").eq("user_id", user_id).execute()
+    if not profile_res.data:
+        return {}
+    profile = profile_res.data[0]
+
+    vocab_count = len(db.table("vocab_srs").select("id").eq("user_id", user_id).execute().data)
+    weaknesses = (
+        db.table("weaknesses")
+        .select("topic, count")
+        .eq("user_id", user_id)
+        .order("count", desc=True)
+        .limit(3)
+        .execute()
+        .data
+    )
     return {**profile, "vocab_count": vocab_count, "top_weaknesses": weaknesses}
