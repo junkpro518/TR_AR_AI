@@ -1,0 +1,19 @@
+services:
+  turkish-tutor:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      # nlm credentials (copy from local: ~/.notebooklm-mcp-cli)
+      - nlm-credentials:/root/.notebooklm-mcp-cli
+      # SQLite DB persistence (tutor.db)
+      - db-data:/app
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  nlm-credentials:
+  db-data:
