@@ -19,6 +19,13 @@ create table if not exists messages (
 );
 create index if not exists messages_user_id_idx on messages (user_id, id desc);
 
+-- Disable RLS for all tables (private single-user bot)
+alter table profile disable row level security;
+alter table messages disable row level security;
+alter table weaknesses disable row level security;
+alter table strengths disable row level security;
+alter table vocab_srs disable row level security;
+
 create table if not exists weaknesses (
     id          bigserial primary key,
     user_id     bigint not null,
