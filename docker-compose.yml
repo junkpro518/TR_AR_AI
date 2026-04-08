@@ -1,0 +1,32 @@
+services:
+  tr-ar-ai:
+    build:
+      context: ./bot
+      dockerfile: Dockerfile
+    image: tr-ar-ai:latest
+    container_name: tr-ar-ai
+    restart: unless-stopped
+
+    env_file: ./bot/.env
+
+    networks:
+      - proxy
+      - hermes-agent_internal
+
+    deploy:
+      resources:
+        limits:
+          memory: 256m
+          cpus: '0.25'
+
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+networks:
+  proxy:
+    external: true
+  hermes-agent_internal:
+    external: true
