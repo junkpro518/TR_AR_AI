@@ -17,6 +17,10 @@ ssh "$VPS" "mkdir -p ~/.notebooklm-mcp-cli/profiles/default"
 rsync -avz ~/.notebooklm-mcp-cli/profiles/default/cookies.json \
   "$VPS:~/.notebooklm-mcp-cli/profiles/default/"
 
+# Copy Hermes SOUL (teacher personality)
+ssh "$VPS" "mkdir -p ~/.hermes"
+rsync -az hermes/SOUL.md "$VPS:~/.hermes/SOUL.md"
+
 echo "==> التحقق من وجود .env على السيرفر..."
 if ! ssh "$VPS" "test -f $REMOTE_DIR/.env"; then
   echo "⚠️  لم يُوجد .env على السيرفر."

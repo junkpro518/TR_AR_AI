@@ -1,13 +1,22 @@
 services:
+  hermes:
+    image: nousresearch/hermes-agent:latest
+    restart: unless-stopped
+    environment:
+      - API_SERVER_ENABLED=true
+      - API_SERVER_KEY=${HERMES_API_KEY}
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
+    volumes:
+      - hermes-data:/root/.hermes
+
   turkish-tutor:
     build: .
     restart: unless-stopped
+    depends_on:
+      - hermes
     env_file: .env
     volumes:
-      # nlm credentials (copy from local: ~/.notebooklm-mcp-cli)
       - nlm-credentials:/root/.notebooklm-mcp-cli
-      # SQLite DB persistence (tutor.db)
-      - db-data:/app
     logging:
       driver: "json-file"
       options:
@@ -16,4 +25,4 @@ services:
 
 volumes:
   nlm-credentials:
-  db-data:
+  hermes-data:
